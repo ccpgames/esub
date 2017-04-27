@@ -317,11 +317,12 @@ func logStat(
 ) {
 	if err != nil && e.Verbose && metric.Requests > 0 {
 		log.Printf(
-			"STATS: failed to add metric for %d %s %+v: %+v",
+			"STATS: failed to add metric for %d %s %+v: %+v: %+v",
 			metric.Requests,
 			name,
 			tags,
 			value,
+			err.Error(),
 		)
 	} else if e.Debug {
 		log.Printf("STATS: %d %s %+v: %+v", metric.Requests, name, tags, value)
