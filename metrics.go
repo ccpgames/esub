@@ -192,7 +192,6 @@ func metricInit() (g *godspeed.Godspeed, settings metricEnv) {
 	if err != nil {
 		log.Fatal("STATS: failed to create godspeed client")
 	}
-	defer loggedClose(g)
 
 	environment := os.Getenv("ESUB_ENVIRONMENT_NAME")
 	if environment != "" {
@@ -234,6 +233,9 @@ func metricTags(metric Metric, tagKeys bool) []string {
 func DisplayStats() {
 	// setup our environment, default tags...
 	g, e := metricInit()
+
+	// close our client when we die
+	defer loggedClose(g)
 
 	// start looping forever
 	lastSent := time.Now().UTC()
