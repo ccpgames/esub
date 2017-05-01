@@ -208,8 +208,13 @@ func HandleKeys(ctx context.Context, w http.ResponseWriter, r *http.Request) {
 func main() {
 	c := xhandler.Chain{}
 
+	// adds a close context to handlers for disconnects
 	c.UseC(xhandler.CloseHandler)
-	c.UseC(CloseConnectionHandler)
+
+	// optionally close all http connections
+	if os.Getenv("ESUB_CLOSE_CONNECTIONS") != "" {
+		c.UseC(CloseConnectionHandler)
+	}
 
 	router := xmux.New()
 
