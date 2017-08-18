@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -14,7 +15,6 @@ import (
 
 	"github.com/rs/xhandler"
 	"github.com/rs/xmux"
-	"golang.org/x/net/context"
 )
 
 type key int
@@ -62,11 +62,12 @@ func logWrite(w http.ResponseWriter, status int, content []byte) {
 }
 
 // pulls the metric struct from context, maybe sets success then sends it
-func shipMetric(ctx context.Context, success bool) {
-	metric := ctx.Value(keyMetric).(*Metric)
+func shipMetric(ctx context.Context, success bool) Metric {
+	metric := *ctx.Value(keyMetric).(*Metric)
 	start := ctx.Value(keyStart).(time.Time)
 	metric.Success = success
-	SendMetric(*metric, 1, start)
+	SendMetric(metric, 1, start)
+	return metric
 }
 
 // HandlePing -- GET /ping -- no metrics
@@ -115,16 +116,28 @@ func HandleSub(ctx context.Context, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// write the body, we're done
+	// write the body
 	logWrite(w, http.StatusOK, sub.Rep)
 
 	// send our metric
-	shipMetric(ctx, true)
+	metric := shipMetric(ctx, true)
+
+	// send a metric for how long we held the rep in memory
+	SendMetric(
+		Metric{
+			Name:    "sub_reply",
+			Route:   metric.Route,
+			Key:     metric.Key,
+			Auth:    metric.Auth,
+			Success: metric.Success,
+		},
+		1,
+		sub.RepTime,
+	)
 }
 
 // HandleRep -- POST /rep/:sub
 func HandleRep(ctx context.Context, w http.ResponseWriter, r *http.Request) {
-
 	// fetch our chain-created sub key
 	key := ctx.Value(keyKey).(string)
 
@@ -164,7 +177,7 @@ func HandleRep(ctx context.Context, w http.ResponseWriter, r *http.Request) {
 	}
 
 	// fulfill the sub
-	sub.RepChan <- body
+	sub.RepChan <- SubReply{body, ctx.Value(keyStart).(time.Time)}
 
 	// write our basic response
 	logWrite(w, http.StatusOK, []byte("OK"))

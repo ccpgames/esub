@@ -1,15 +1,26 @@
 package main
 
 import (
+	"context"
+	"time"
+
 	"github.com/twinj/uuid"
-	"golang.org/x/net/context"
 )
+
+// ZeroTime -- because golang
+var ZeroTime = time.Date(1, time.January, 1, 0, 0, 0, 0, time.UTC)
 
 func subKeys(m map[string]Sub) (keys []string) {
 	for k := range m {
 		keys = append(keys, k)
 	}
 	return keys
+}
+
+// SubReply -- temporary storage for the reply data and timestamp
+type SubReply struct {
+	data    []byte
+	repTime time.Time
 }
 
 // Sub -- per connected client
@@ -24,8 +35,10 @@ type Sub struct {
 	Cancel context.CancelFunc
 	// Bytes object stored after we receive our Rep
 	Rep []byte
+	// Time of receiving the Rep
+	RepTime time.Time
 	// Channel to receive the Rep into
-	RepChan chan []byte
+	RepChan chan SubReply
 }
 
 type subChanStruct struct {
@@ -96,7 +109,7 @@ func queryForSub(q subQueryStruct) Sub {
 	if found {
 		return val
 	}
-	return Sub{"", "", nil, nil, nil, nil}
+	return Sub{"", "", nil, nil, nil, ZeroTime, nil}
 }
 
 // RegisterSub -- create and register a new Sub object
@@ -105,7 +118,7 @@ func RegisterSub(cancel context.CancelFunc, key string, token string) Sub {
 		Key:     key,
 		Auth:    token,
 		ID:      uuid.NewV4(),
-		RepChan: make(chan []byte),
+		RepChan: make(chan SubReply),
 		Cancel:  cancel,
 	}
 	subChan <- subChanStruct{sub}
@@ -120,7 +133,7 @@ func SubQuery(ctx context.Context, key string) (Sub, error) {
 	for {
 		select {
 		case <-ctx.Done():
-			return Sub{"", "", nil, nil, nil, nil}, ctx.Err()
+			return Sub{"", "", nil, nil, nil, ZeroTime, nil}, ctx.Err()
 
 		case sub := <-reply:
 			return sub, nil
@@ -149,7 +162,8 @@ func (s Sub) Get(ctx context.Context) (Sub, error) {
 		case <-ctx.Done():
 			return s, ctx.Err()
 		case rep := <-s.RepChan:
-			s.Rep = rep
+			s.Rep = rep.data
+			s.RepTime = rep.repTime
 			return s, nil
 		}
 	}

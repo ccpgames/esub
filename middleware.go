@@ -1,12 +1,12 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"time"
 
 	"github.com/rs/xhandler"
 	"github.com/rs/xmux"
-	"golang.org/x/net/context"
 )
 
 // CloseConnectionHandler -- closes all connections

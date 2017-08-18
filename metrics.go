@@ -12,6 +12,7 @@ import (
 
 // Metric -- groups request metrics, route is the only required value
 type Metric struct {
+	Name    string
 	Route   string
 	Key     string
 	Auth    bool
@@ -80,6 +81,7 @@ func goCounterWriter() {
 				// drop the reported durations from the front of the slice
 				v.Durations = append(v.Durations[0:0], v.Durations[ci.value*-1:]...)
 			}
+
 			counter[ci.bucket] = v
 
 		case cq := <-counterQueryChan:
@@ -226,6 +228,8 @@ func metricTags(metric Metric, tagKeys bool) []string {
 	if metric.Auth {
 		tags = append(tags, fmt.Sprintf("auth:%+v", metric.Auth))
 	}
+
+	tags = append(tags, fmt.Sprintf("success:%+v", metric.Success))
 	return tags
 }
 
@@ -249,10 +253,10 @@ func DisplayStats() {
 			}
 
 			var metricName string
-			if k.Success {
-				metricName = fmt.Sprintf("%s.success", e.Prefix)
+			if k.Name == "" {
+				metricName = e.Prefix
 			} else {
-				metricName = fmt.Sprintf("%s.failed", e.Prefix)
+				metricName = fmt.Sprintf("%s.%s", e.Prefix, k.Name)
 			}
 
 			displayStat(g, k, v, metricName, metricTags(k, e.TagKeys), timeSince, e)
