@@ -31,7 +31,7 @@ The general esub flow is:
 
 # esub phases
 
-Currently esub has implemented phase 1 of 4.
+Currently esub has implemented phase 1.5 of 4.
 
 
 ## esub phase 1
@@ -45,6 +45,15 @@ route     | description
 /ping     | health check endpoint
 /sub/:sub | start a new sub
 /rep/:rep | reply to a sub
+
+
+## esub phase 1.5
+
+Adds persistence via a new websocket route `/psub/:sub`. Reply to `psub`s via `rep` still, you can use `psub=1` in the qsargs to `rep` for a minor performance gain. Otherwise a `sub` lookup happens first, then a fallback to look for a waiting `psub`.
+
+route      | description
+-----------|------------
+/psub/:sub | start a new persistent sub
 
 
 ## esub phase 2
@@ -83,6 +92,19 @@ With phase 4 it would be possible to rep a sub on an incorrect node in the same 
 There is a python client library available [here](https://github.com/ccpgames/esub-client). Using a dedicated client for esub is debatable. The intention is for the API to be straight-forward enough to not require one. Basically just use whatever HTTP client library you're comfortable with, use the python client as a guide if you need it.
 
 
+# esub psubs
+
+As of Aug 21, 2017, esub now supports persistent queues via the `/psub/:sub` route. `Psub`s function much the same as regular `sub`s, but instead use websockets and deliver multiple `rep`s through the same connection. You can also configure `psub`s for multiple client distribution by providing `shared=1` in the qsargs of the `/psub/:sub` route. Note that both the `sub` and `token` must match the members of the existing `psub` shared pool. Shared `psub` message distribution is a simple round robin.
+
+## read receipts or keepalives
+
+An important consideration when deploying a `psub` environment, is if you will use high or low traffic mode. In a low traffic setup, each message is replied to by the clients with a read receipt. In a high traffic setup, each client periodically sends unsolicited pings to the server to maintain a keepalive (as a backup for lulls in traffic).
+
+The important distinction comes in the case of one client in a shared `psub` disconnecting. In a low traffic environment, as soon as the read receipt is not confirmed, the message is redirected to the next `psub` in the shared pool (or a 404 is delivered to the `/rep/:sub` call if the pool is empty). In a high traffic environment it will be the second failed message to a client which is noticed as a client disconnecting. Two messages will be redirected to the next client in the psub pool in that case. Note that in high traffic mode the first failed to deliver, but not yet redirected, message will result in a 200 OK response from `/rep/:sub`. The second message sent to the failing `psub` will result in a 200 OK only if there are other clients in the shared pool to redirect both failed messages to.
+
+The above high traffic limitation can also be completely avoided by sending proper close messages from the clients, this is not always possible though. Also note this only really affects shared `psub`s and the first error response from improperly disconnected `psub` clients.
+
+
 # docker
 
 A Dockerfile is included in this repo. There is also a `run.sh` script which will build and (re)start an esub container for you, exposed on 8090 with debug logging enabled.
@@ -101,6 +123,10 @@ ESUB_METRIC_PREFIX    | esub               | prefix for all metrics
 ESUB_NODE_IP          | first non-loopback | node address
 ESUB_TAG_KEYS         |                    | include sub keys in metric tags (set to anything to enable)
 ESUB_VERBOSE_DEBUG    |                    | verbose debug logging (set to anything to enable)
+ESUB_CLOSE_CONNECTIONS |                   | force closed all http connections
+ESUB_PORT             | 8090               | esub listening port
+ESUB_CONFIRM_RECEIPT  |                    | read receipt per psub rep (low traffic)
+ESUB_PING_FREQUENCY   | 60                 | seconds between keepalive prunes (high traffic)
 
 
 # bugs

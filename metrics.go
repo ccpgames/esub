@@ -12,11 +12,12 @@ import (
 
 // Metric -- groups request metrics, route is the only required value
 type Metric struct {
-	Name    string
-	Route   string
-	Key     string
-	Auth    bool
-	Success bool
+	Name      string
+	Route     string
+	Key       string
+	Auth      bool
+	Success   bool
+	Confirmed bool
 }
 
 // MetricValue -- queued metric values
@@ -227,6 +228,9 @@ func metricTags(metric Metric, tagKeys bool) []string {
 	}
 	if metric.Auth {
 		tags = append(tags, fmt.Sprintf("auth:%+v", metric.Auth))
+	}
+	if metric.Confirmed {
+		tags = append(tags, fmt.Sprintf("confirmed:%+v", metric.Confirmed))
 	}
 
 	tags = append(tags, fmt.Sprintf("success:%+v", metric.Success))
