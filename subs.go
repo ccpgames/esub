@@ -251,6 +251,15 @@ func listPSubs() (psubs []Sub) {
 	return psubs
 }
 
+func updatePsubPing(key, id string) {
+	subPings, found := psubPings[key]
+	if found {
+		subPings[id] = time.Now().UTC()
+	} else {
+		psubPings[key] = map[string]time.Time{id: time.Now().UTC()}
+	}
+}
+
 // manage Sub channels
 func goSubWriter() {
 	for {
@@ -293,7 +302,7 @@ func goSubWriter() {
 			pv.valid <- validPSub(pv.key, pv.token, pv.shared)
 
 		case pp := <-psubPingChan:
-			psubPings[pp.key][pp.id] = time.Now().UTC()
+			updatePsubPing(pp.key, pp.id)
 
 		case ppl := <-psubPingListChan:
 			ppl <- psubPings
@@ -460,12 +469,7 @@ func (s Sub) Get(ctx context.Context) (SubReply, error) {
 }
 
 func updateKeepalive(key, id string) {
-	subPings, found := psubPings[key]
-	if found {
-		subPings[id] = time.Now().UTC()
-	} else {
-		psubPings[key] = map[string]time.Time{id: time.Now().UTC()}
-	}
+	psubPingChan <- psubPingStruct{key, id}
 }
 
 // PongHandler accepts psub keepalive pongs
