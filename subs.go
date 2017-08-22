@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -55,6 +56,9 @@ type Sub struct {
 	Websocket *websocket.Conn
 	// if this PSub can be shared with other readers
 	Shared bool
+
+	// good thing this isn't a part of any underlying library...
+	Mutex *sync.Mutex
 }
 
 type subQueryStruct struct {
@@ -369,6 +373,7 @@ func RegisterPSub(
 		Websocket: conn,
 		Shared:    shared,
 		Valid:     make(chan bool),
+		Mutex:     &sync.Mutex{},
 	}
 	if !CONFIRM {
 		updateKeepalive(sub.Key, sub.ID.String())
@@ -490,6 +495,8 @@ func ValidPSub(key, token string, shared bool) bool {
 
 // WriteToPSub -- send a message to a Sub's websocket
 func WriteToPSub(conn *websocket.Conn, reply SubReply, sub Sub) (success bool) {
+	sub.Mutex.Lock()
+
 	err := conn.WriteMessage(websocket.TextMessage, reply.data)
 	if err != nil {
 		return false
@@ -525,6 +532,8 @@ func WriteToPSub(conn *websocket.Conn, reply SubReply, sub Sub) (success bool) {
 	} else {
 		UpdateLastRep(sub, reply)
 	}
+
+	sub.Mutex.Unlock()
 
 	// send a write metric
 	SendMetric(
