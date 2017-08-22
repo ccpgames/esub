@@ -100,12 +100,14 @@ func HandlePSub(ctx context.Context, w http.ResponseWriter, r *http.Request) {
 	conn.SetCloseHandler(func(code int, text string) error {
 		shipMetric(ctx, false)
 		DeregisterPSub(sub)
+		sub.Mutex.Lock()
 		if connClosed := closeConn(conn, code, ""); connClosed != nil {
 			// one way or another, be sure to close the socket
 			if closeErr := conn.Close(); closeErr != nil {
 				log.Printf("failed to close socket: %+v: %+v", connClosed, closeErr)
 			}
 		}
+		sub.Mutex.Unlock()
 		sub.Cancel()
 		return nil
 	})
