@@ -499,6 +499,7 @@ func WriteToPSub(conn *websocket.Conn, reply SubReply, sub Sub) (success bool) {
 
 	err := conn.WriteMessage(websocket.TextMessage, reply.data)
 	if err != nil {
+		sub.Mutex.Unlock()
 		return false
 	}
 
@@ -522,11 +523,13 @@ func WriteToPSub(conn *websocket.Conn, reply SubReply, sub Sub) (success bool) {
 		setReadErr := conn.SetReadDeadline(time.Now().UTC().Add(1 * time.Second))
 
 		if setReadErr != nil {
+			sub.Mutex.Unlock()
 			return false
 		}
 
 		_, _, err := conn.ReadMessage()
 		if err != nil {
+			sub.Mutex.Unlock()
 			return false
 		}
 	} else {
