@@ -626,7 +626,7 @@ func goTimeoutPSubs(ctx context.Context) {
 				if now.After(lastPing.Add(pingTime)) {
 
 					sub, err := SpecificPSub(ctx, subKey, subID)
-					if err != nil {
+					if err != nil || sub.Key == "" {
 						return
 					}
 					log.Printf("psub %s for %s has timed out", sub.ID, sub.Key)
