@@ -139,6 +139,9 @@ func Initialize(ctx context.Context) {
 	psubPingListChan = make(chan chan map[string]map[string]time.Time)
 
 	go goSubWriter()
+	go goPSubWriter()
+	go goPingWriter()
+
 	if !CONFIRM {
 		go goTimeoutPSubs(ctx)
 	}
@@ -265,17 +268,11 @@ func goSubWriter() {
 	for {
 		select {
 
-		case pn := <-psubChan:
-			addPSub(pn)
-
 		case cn := <-subChan:
 			addSub(cn)
 
 		case cq := <-subQueryChan:
 			cq.channel <- queryForSub(cq)
-
-		case pq := <-psubQueryChan:
-			pq.channel <- queryForSpecificPSub(pq)
 
 		case cc := <-subCountChan:
 			cc <- countSubs()
@@ -283,11 +280,26 @@ func goSubWriter() {
 		case cd := <-subDeleteChan:
 			deleteSub(cd)
 
-		case pd := <-psubDeleteChan:
-			deletePSub(pd)
-
 		case cl := <-subListChan:
 			cl <- listSubs()
+
+		}
+	}
+}
+
+// manage PSub channels
+func goPSubWriter() {
+	for {
+		select {
+
+		case pn := <-psubChan:
+			addPSub(pn)
+
+		case pq := <-psubQueryChan:
+			pq.channel <- queryForSpecificPSub(pq)
+
+		case pd := <-psubDeleteChan:
+			deletePSub(pd)
 
 		case pl := <-psubListChan:
 			pl <- listPSubs()
@@ -301,11 +313,21 @@ func goSubWriter() {
 		case pv := <-psubValidityChan:
 			pv.valid <- validPSub(pv.key, pv.token, pv.shared)
 
+		}
+	}
+}
+
+// manage ping channels
+func goPingWriter() {
+	for {
+		select {
+
 		case pp := <-psubPingChan:
 			updatePsubPing(pp.key, pp.id)
 
 		case ppl := <-psubPingListChan:
 			ppl <- psubPings
+
 		}
 	}
 }
@@ -413,20 +435,11 @@ func SpecificPSub(ctx context.Context, key, id string) (Sub, error) {
 	}
 }
 
-// SubQuery -- uses the key from ctx to query for the Sub
-func SubQuery(ctx context.Context, key string, psub bool) (Sub, error) {
+// SubQuery -- query for the Sub
+func SubQuery(key string, psub bool) Sub {
 	reply := make(chan Sub)
 	subQueryChan <- subQueryStruct{key, psub, reply}
-
-	for {
-		select {
-		case <-ctx.Done():
-			return Sub{}, ctx.Err()
-
-		case sub := <-reply:
-			return sub, nil
-		}
-	}
+	return <-reply
 }
 
 // GetLastRep returns the last rep for the psub
@@ -473,7 +486,7 @@ func updateKeepalive(key, id string) {
 }
 
 // PongHandler accepts psub keepalive pongs
-func (s Sub) PongHandler(appData string) error {
+func (s Sub) PongHandler(_ string) error {
 	updateKeepalive(s.Key, s.ID.String())
 	return nil
 }
@@ -561,15 +574,15 @@ func WriteToPSub(conn *websocket.Conn, reply SubReply, sub Sub) (success bool) {
 
 // RedirectPSub -- send the rep to the next sub in the psub
 // returns a boolean of the message(s) being successfully redirected
-func RedirectPSub(ctx context.Context, sub Sub, reply SubReply) bool {
+func RedirectPSub(sub Sub, reply SubReply) bool {
 	if !sub.Shared {
 		return false
 	}
-	return redirectPSub(ctx, sub, reply)
+	return redirectPSub(sub, reply)
 }
 
 // redirectPSub -- redirect until a shared psub receives the rep
-func redirectPSub(ctx context.Context, sub Sub, replies ...SubReply) bool {
+func redirectPSub(sub Sub, replies ...SubReply) bool {
 	lastRep := GetLastRep(sub)
 	if !lastRep.repTime.IsZero() {
 		// without confirming receipt with a read from the client,
@@ -582,8 +595,8 @@ func redirectPSub(ctx context.Context, sub Sub, replies ...SubReply) bool {
 		replies = append(replies, lastRep)
 	}
 
-	psub, err := SubQuery(ctx, sub.Key, true)
-	if err != nil || psub.ID == nil {
+	psub := SubQuery(sub.Key, true)
+	if psub.ID == nil {
 		log.Printf("shared psub '%s' has no connections, dropping %d message(s)",
 			sub.Key, len(replies))
 		return false
@@ -592,7 +605,7 @@ func redirectPSub(ctx context.Context, sub Sub, replies ...SubReply) bool {
 	for i := 0; i < len(replies); i++ {
 		if !WriteToPSub(psub.Websocket, replies[i], psub) {
 			DeregisterPSub(psub)
-			return redirectPSub(ctx, psub, replies[i:]...)
+			return redirectPSub(psub, replies[i:]...)
 		}
 	}
 

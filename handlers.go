@@ -6,9 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -97,20 +97,7 @@ func HandlePSub(ctx context.Context, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	conn.SetCloseHandler(func(code int, text string) error {
-		shipMetric(ctx, false)
-		DeregisterPSub(sub)
-		sub.Mutex.Lock()
-		if connClosed := closeConn(conn, code, ""); connClosed != nil {
-			// one way or another, be sure to close the socket
-			if closeErr := conn.Close(); closeErr != nil {
-				log.Printf("failed to close socket: %+v: %+v", connClosed, closeErr)
-			}
-		}
-		sub.Mutex.Unlock()
-		sub.Cancel()
-		return nil
-	})
+	conn.SetCloseHandler(closeWS(ctx, sub.Mutex, psubConn{sub}, conn))
 
 	for {
 		rep, subErr := sub.Get(ctx)
@@ -119,7 +106,7 @@ func HandlePSub(ctx context.Context, w http.ResponseWriter, r *http.Request) {
 			return
 		} else if !WriteToPSub(conn, rep, sub) {
 			DeregisterPSub(sub)
-			RedirectPSub(ctx, sub, rep)
+			RedirectPSub(sub, rep)
 			cancel()
 			return
 		} else {
@@ -193,65 +180,78 @@ func HandleSub(ctx context.Context, w http.ResponseWriter, r *http.Request) {
 	)
 }
 
+// HandlePRep -- GET /prep/ -- websocket reps
+func HandlePRep(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+
+	ctx, cancel := context.WithCancel(ctx)
+
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Println(err)
+		cancel()
+		return
+	}
+
+	pRep := RegisterPRep(cancel, conn)
+
+	go pRep.ReadLoop()
+
+	conn.SetCloseHandler(closeWS(ctx, pRep.WriteMutex, pRepConn{pRep}, conn))
+
+	for {
+		rep, wsErr := pRep.Read(ctx)
+		if wsErr != nil {
+			// invalid format or disconnect, kill the client
+			DeregisterPRep(pRep)
+			return
+		}
+
+		// start a timer for metrics
+		repTime := time.Now().UTC()
+
+		// checks for validity, passes to sub
+		repErr := receiveRep(rep.key, rep.token, rep.psub, rep.rep, repTime)
+
+		var confirmed bool
+		if CONFIRM {
+			confirmed = pRep.Confirm(repErr)
+		} else {
+			confirmed = false
+		}
+
+		// send a metric for this pRep message
+		SendMetric(
+			Metric{
+				Name:      "prep_message",
+				Route:     "prep",
+				Key:       rep.key,
+				Auth:      rep.token != "",
+				Success:   repErr.code == 0,
+				Confirmed: confirmed,
+			},
+			1,
+			repTime,
+		)
+	}
+}
+
 // HandleRep -- POST /rep/:sub
 func HandleRep(ctx context.Context, w http.ResponseWriter, r *http.Request) {
 
 	// fetch our chain-created sub key
 	key := ctx.Value(keyKey).(string)
+	token := ctx.Value(keyToken).(string)
+	start := ctx.Value(keyStart).(time.Time)
 
 	// optionally specify replying to a psub, minor performance gain
 	psubRep := r.URL.Query().Get("psub") == "1"
 
-	// fetch the sub object, can be null
-	sub, err := SubQuery(ctx, key, psubRep)
-
-	// canceled request
-	if err != nil {
+	// read and receive the rep, auth and existence checks are here
+	repError := receiveRep(key, token, psubRep, postRep{r}, start)
+	if repError.code > 0 {
+		logWrite(w, repError.code, repError.message)
 		shipMetric(ctx, false)
 		return
-	}
-
-	// check the key is known to us
-	if sub.Key != key || key == "" {
-		logWrite(w, http.StatusNotFound, []byte("Unknown key"))
-		shipMetric(ctx, false)
-		return
-	}
-
-	// late auth check
-	if sub.Auth != ctx.Value(keyToken) {
-		logWrite(w, http.StatusForbidden, []byte("Invalid token"))
-		shipMetric(ctx, false)
-		return
-	}
-
-	// read the body into memory
-	body, err := ioutil.ReadAll(r.Body)
-	if err != nil {
-		logWrite(
-			w,
-			http.StatusInternalServerError,
-			[]byte(fmt.Sprintf("Failed to read body: %+v", err)),
-		)
-		shipMetric(ctx, false)
-		return
-	}
-
-	subReply := SubReply{body, ctx.Value(keyStart).(time.Time)}
-
-	if sub.Websocket != nil {
-		// sub is a psub
-		if !WriteToPSub(sub.Websocket, subReply, sub) {
-			DeregisterPSub(sub)
-			if !RedirectPSub(ctx, sub, subReply) {
-				shipMetric(ctx, false)
-				logWrite(w, http.StatusNotFound, []byte("No listeners remain"))
-				return
-			}
-		}
-	} else {
-		// fulfill the sub
-		sub.RepChan <- subReply
 	}
 
 	// write our basic response
@@ -291,4 +291,55 @@ func HandleKeys(ctx context.Context, w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	logWrite(w, http.StatusOK, jsonKeys)
 	shipMetric(ctx, true)
+}
+
+func closeWS(
+	ctx context.Context,
+	m sync.Locker,
+	w wsConn,
+	conn *websocket.Conn,
+) func(code int, text string) error {
+	return func(code int, text string) error {
+		shipMetric(ctx, false)
+		w.Deregister()
+		m.Lock()
+		if connClosed := closeConn(conn, code, ""); connClosed != nil {
+			// one way or another, be sure to close the socket
+			if closeErr := conn.Close(); closeErr != nil {
+				log.Printf("failed to close socket: %+v: %+v", connClosed, closeErr)
+			}
+		}
+		m.Unlock()
+		w.Cancel()
+		return nil
+	}
+}
+
+type wsConn interface {
+	Cancel()
+	Deregister()
+}
+
+type psubConn struct {
+	sub Sub
+}
+
+func (p psubConn) Cancel() {
+	p.sub.Cancel()
+}
+
+func (p psubConn) Deregister() {
+	DeregisterPSub(p.sub)
+}
+
+type pRepConn struct {
+	pRep PRep
+}
+
+func (p pRepConn) Cancel() {
+	p.pRep.Cancel()
+}
+
+func (p pRepConn) Deregister() {
+	DeregisterPRep(p.pRep)
 }

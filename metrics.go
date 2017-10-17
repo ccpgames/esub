@@ -270,19 +270,31 @@ func DisplayStats() {
 		}
 
 		// display outstanding sub count
-		subs := SubCount()
-		err := g.Count(fmt.Sprintf("%s.sub.waiting", e.Prefix), subs, []string{})
-		if err != nil && e.Verbose && subs > 0 {
-			log.Printf("STATS: failed to add metric: %+v waiting subs(s)", subs)
-		} else if e.Debug {
-			log.Printf("STATS: %+v waiting sub(s)", subs)
-		}
+		displayCount(g, e, "sub.waiting", SubCount())
+
+		// display outstanding pRep count
+		displayCount(g, e, "rep.waiting", pRepCount())
 
 		// capture run finish time
 		lastSent = time.Now().UTC()
 
 		// sleepy time
 		time.Sleep(10 * time.Second)
+	}
+}
+
+func displayCount(
+	g *godspeed.Godspeed,
+	e metricEnv,
+	metric string,
+	value float64,
+) {
+	metricName := fmt.Sprintf("%s.%s", e.Prefix, metric)
+	err := g.Count(metricName, value, []string{})
+	if err != nil && e.Verbose && value > 0 {
+		log.Printf("STATS: failed to send %s: %+v", metricName, value)
+	} else if e.Debug {
+		log.Printf("STATS: %s: %+v", metricName, value)
 	}
 }
 

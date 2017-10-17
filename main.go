@@ -104,9 +104,14 @@ func main() {
 		"/rep/:sub",
 		MetricHandler("rep", xhandler.HandlerFuncC(HandleRep)),
 	)
+	router.GET(
+		"/prep",
+		MetricHandler("prep", xhandler.HandlerFuncC(HandlePRep)),
+	)
 
 	Initialize(context.Background())
 	CounterInitialize()
+	PRepInitialize()
 	go DisplayStats()
 
 	port := os.Getenv("ESUB_PORT")
