@@ -13,6 +13,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/xhandler"
 	"github.com/rs/xmux"
 )
@@ -82,6 +83,8 @@ func main() {
 	}
 
 	router := xmux.New()
+
+	router.Handle(http.MethodGet, "/metrics", promhttp.Handler())
 
 	router.GET("/ping", xhandler.HandlerFuncC(HandlePing))
 	router.GET(
