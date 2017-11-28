@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -30,13 +31,13 @@ func HandlePing(ctx context.Context, w http.ResponseWriter, r *http.Request) {
 func HandleInfo(ctx context.Context, w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	logWrite(w, http.StatusOK, infoJSON)
-	shipMetric(ctx, true)
+	SendTiming(ctx, httpRequest, "info", r.Method, "true", "false")
 }
 
-func closeConn(conn *websocket.Conn, code int, reason string) error {
+func closeConn(conn *websocket.Conn, code int) error {
 	message := []byte{}
 	if code != websocket.CloseNoStatusReceived {
-		message = websocket.FormatCloseMessage(code, reason)
+		message = websocket.FormatCloseMessage(code, "")
 	}
 	w, err := conn.NextWriter(websocket.CloseMessage)
 	if err != nil {
@@ -53,64 +54,48 @@ func closeConn(conn *websocket.Conn, code int, reason string) error {
 	return conn.Close()
 }
 
-func closePsubInvalid(ctx context.Context, conn *websocket.Conn) {
-	shipMetric(ctx, false)
-	err := closeConn(conn, websocket.CloseMandatoryExtension, "invalid token")
-	if err != nil {
-		log.Printf("failed to close socket: %+v", err)
-	}
-}
-
 // HandlePSub -- GET /psub/:sub
 func HandlePSub(ctx context.Context, w http.ResponseWriter, r *http.Request) {
 	key := ctx.Value(keyKey).(string)
 	token := ctx.Value(keyToken).(string)
 	shared := r.URL.Query().Get("shared") == "1"
 	ctx, cancel := context.WithCancel(ctx)
+	auth := strconv.FormatBool(token != "")
 
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Println(err)
 		cancel()
+		SendTiming(ctx, httpRequest, "psub", r.Method, "false", auth)
 		return
 	}
 
-	if !ValidPSub(key, token, shared) {
-		closePsubInvalid(ctx, conn)
-		log.Println("invalid psub req")
+	psub, sub, err := RegisterPSub(cancel, key, token, shared, conn)
+	if err != nil {
 		cancel()
+		SendTiming(ctx, httpRequest, "psub", r.Method, "false", auth)
 		return
 	}
-
-	sub := RegisterPSub(cancel, key, token, shared, conn)
 
 	if !CONFIRM {
 		conn.SetPongHandler(sub.PongHandler)
-		go sub.ReadLoop()
+		go psub.ReadLoop(sub)
 	}
 
-	// maybe this could happen in race conditions...
-	if !<-sub.Valid {
-		DeregisterPSub(sub)
-		closePsubInvalid(ctx, conn)
-		cancel()
-		return
-	}
-
-	conn.SetCloseHandler(closeWS(ctx, sub.Mutex, psubConn{sub}, conn))
+	psubIface := &psubConn{sub: sub, psub: psub}
+	conn.SetCloseHandler(
+		closeWS(ctx, sub.Mutex, psubIface, conn, "psub"),
+	)
 
 	for {
 		rep, subErr := sub.Get(ctx)
 		if subErr != nil {
-			DeregisterPSub(sub)
+			SendTiming(ctx, httpRequest, "psub", r.Method, "false", auth)
 			return
-		} else if !WriteToPSub(conn, rep, sub) {
-			DeregisterPSub(sub)
-			RedirectPSub(sub, rep)
-			cancel()
+		} else if !psub.WriteToSub(sub, rep) {
+			psub.Redirect(sub, rep)
+			SendTiming(ctx, httpRequest, "psub", r.Method, "false", auth)
 			return
-		} else {
-			shipMetric(ctx, true)
 		}
 	}
 }
@@ -120,10 +105,11 @@ func HandleSub(ctx context.Context, w http.ResponseWriter, r *http.Request) {
 
 	key := ctx.Value(keyKey).(string)
 	token := ctx.Value(keyToken).(string)
+	auth := strconv.FormatBool(token != "")
 
 	if key == "" {
 		logWrite(w, http.StatusNotFound, []byte("Not found"))
-		shipMetric(ctx, false)
+		SendTiming(ctx, httpRequest, "sub", r.Method, "false", auth)
 		return
 	}
 
@@ -131,16 +117,16 @@ func HandleSub(ctx context.Context, w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(ctx)
 
 	// create/register the sub
-	sub := RegisterSub(cancel, key, token)
+	sub, err := RegisterSub(cancel, key, token)
 
 	// check for validity
-	if !<-sub.Valid {
+	if err != nil {
 		logWrite(
 			w,
 			http.StatusForbidden,
-			[]byte("Failed to create sub. Key is used and token does not match."),
+			[]byte(err.Error()),
 		)
-		shipMetric(ctx, false)
+		SendTiming(ctx, httpRequest, "sub", r.Method, "false", auth)
 		return
 	}
 
@@ -148,7 +134,7 @@ func HandleSub(ctx context.Context, w http.ResponseWriter, r *http.Request) {
 	rep, err := sub.Get(ctx)
 
 	// could be canceled, could be done. either way clean up if we're the owner
-	subDeleteChan <- sub
+	sub.Deregister()
 
 	if err != nil {
 		logWrite(
@@ -156,7 +142,7 @@ func HandleSub(ctx context.Context, w http.ResponseWriter, r *http.Request) {
 			http.StatusInternalServerError,
 			[]byte(fmt.Sprintf("Failed to fullfil sub: %+v", err.Error())),
 		)
-		shipMetric(ctx, false)
+		SendTiming(ctx, httpRequest, "sub", r.Method, "false", auth)
 		return
 	}
 
@@ -164,20 +150,8 @@ func HandleSub(ctx context.Context, w http.ResponseWriter, r *http.Request) {
 	logWrite(w, http.StatusOK, rep.data)
 
 	// send our metric
-	metric := shipMetric(ctx, true)
+	SendTiming(ctx, httpRequest, "sub", r.Method, "true", auth)
 
-	// send a metric for how long we held the rep in memory
-	SendMetric(
-		Metric{
-			Name:    "sub_reply",
-			Route:   metric.Route,
-			Key:     metric.Key,
-			Auth:    metric.Auth,
-			Success: metric.Success,
-		},
-		1,
-		rep.repTime,
-	)
 }
 
 // HandlePRep -- GET /prep/ -- websocket reps
@@ -189,6 +163,7 @@ func HandlePRep(ctx context.Context, w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Println(err)
 		cancel()
+		SendTiming(ctx, httpRequest, "prep", r.Method)
 		return
 	}
 
@@ -196,13 +171,15 @@ func HandlePRep(ctx context.Context, w http.ResponseWriter, r *http.Request) {
 
 	go pRep.ReadLoop()
 
-	conn.SetCloseHandler(closeWS(ctx, pRep.WriteMutex, pRepConn{pRep}, conn))
+	conn.SetCloseHandler(
+		closeWS(ctx, pRep.WriteMutex, pRepConn{pRep}, conn, "prep"),
+	)
 
 	for {
 		rep, wsErr := pRep.Read(ctx)
 		if wsErr != nil {
 			// invalid format or disconnect, kill the client
-			DeregisterPRep(pRep)
+			pRep.Deregister()
 			return
 		}
 
@@ -219,19 +196,16 @@ func HandlePRep(ctx context.Context, w http.ResponseWriter, r *http.Request) {
 			confirmed = false
 		}
 
-		// send a metric for this pRep message
-		SendMetric(
-			Metric{
-				Name:      "prep_message",
-				Route:     "prep",
-				Key:       rep.key,
-				Auth:      rep.token != "",
-				Success:   repErr.code == 0,
-				Confirmed: confirmed,
-			},
-			1,
-			repTime,
+		SendHistogram(
+			httpRequest,
+			time.Since(repTime).Seconds(),
+			"prep",
+			r.Method,
+			strconv.FormatBool(repErr.code == 0),
+			strconv.FormatBool(rep.token != ""),
+			strconv.FormatBool(confirmed),
 		)
+
 	}
 }
 
@@ -242,6 +216,7 @@ func HandleRep(ctx context.Context, w http.ResponseWriter, r *http.Request) {
 	key := ctx.Value(keyKey).(string)
 	token := ctx.Value(keyToken).(string)
 	start := ctx.Value(keyStart).(time.Time)
+	auth := strconv.FormatBool(token != "")
 
 	// optionally specify replying to a psub, minor performance gain
 	psubRep := r.URL.Query().Get("psub") == "1"
@@ -250,7 +225,7 @@ func HandleRep(ctx context.Context, w http.ResponseWriter, r *http.Request) {
 	repError := receiveRep(key, token, psubRep, postRep{r}, start)
 	if repError.code > 0 {
 		logWrite(w, repError.code, repError.message)
-		shipMetric(ctx, false)
+		SendTiming(ctx, httpRequest, "rep", r.Method, "false", auth)
 		return
 	}
 
@@ -258,7 +233,7 @@ func HandleRep(ctx context.Context, w http.ResponseWriter, r *http.Request) {
 	logWrite(w, http.StatusOK, []byte("OK"))
 
 	// send our timing metric
-	shipMetric(ctx, true)
+	SendTiming(ctx, httpRequest, "rep", r.Method, "true", auth)
 }
 
 // HandleKeys -- GET /keys
@@ -266,12 +241,13 @@ func HandleKeys(ctx context.Context, w http.ResponseWriter, r *http.Request) {
 	// TODO: add optional token auth to this route
 
 	// fetch the current list of local subs
-	subs := SubList()
+	subs := listSubs()
+	subs = append(subs, listPSubs()...)
 
 	if subs == nil {
 		// no active subs, still a success
 		logWrite(w, http.StatusNoContent, nil)
-		shipMetric(ctx, true)
+		SendTiming(ctx, httpRequest, "keys", r.Method, "true")
 		return
 	}
 
@@ -283,14 +259,14 @@ func HandleKeys(ctx context.Context, w http.ResponseWriter, r *http.Request) {
 			http.StatusInternalServerError,
 			[]byte(fmt.Sprintf("Failed to dump JSON: %+v", err.Error())),
 		)
-		shipMetric(ctx, false)
+		SendTiming(ctx, httpRequest, "keys", r.Method, "false")
 		return
 	}
 
 	// write the response
 	w.Header().Set("Content-Type", "application/json")
 	logWrite(w, http.StatusOK, jsonKeys)
-	shipMetric(ctx, true)
+	SendTiming(ctx, httpRequest, "keys", r.Method, "true")
 }
 
 func closeWS(
@@ -298,12 +274,14 @@ func closeWS(
 	m sync.Locker,
 	w wsConn,
 	conn *websocket.Conn,
+	route string,
 ) func(code int, text string) error {
 	return func(code int, text string) error {
-		shipMetric(ctx, false)
+		SendTiming(ctx, httpRequest, route, http.MethodGet, "false")
+
 		w.Deregister()
 		m.Lock()
-		if connClosed := closeConn(conn, code, ""); connClosed != nil {
+		if connClosed := closeConn(conn, code); connClosed != nil {
 			// one way or another, be sure to close the socket
 			if closeErr := conn.Close(); closeErr != nil {
 				log.Printf("failed to close socket: %+v: %+v", connClosed, closeErr)
@@ -321,7 +299,8 @@ type wsConn interface {
 }
 
 type psubConn struct {
-	sub Sub
+	psub *PSub
+	sub  *Sub
 }
 
 func (p psubConn) Cancel() {
@@ -329,11 +308,11 @@ func (p psubConn) Cancel() {
 }
 
 func (p psubConn) Deregister() {
-	DeregisterPSub(p.sub)
+	p.psub.Deregister(p.sub)
 }
 
 type pRepConn struct {
-	pRep PRep
+	pRep *PRep
 }
 
 func (p pRepConn) Cancel() {
@@ -341,5 +320,5 @@ func (p pRepConn) Cancel() {
 }
 
 func (p pRepConn) Deregister() {
-	DeregisterPRep(p.pRep)
+	p.pRep.Deregister()
 }

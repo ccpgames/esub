@@ -20,7 +20,7 @@ func CloseConnectionHandler(next xhandler.HandlerC) xhandler.HandlerC {
 }
 
 // MetricHandler -- adds ctx values to keys
-func MetricHandler(route string, next xhandler.HandlerC) xhandler.HandlerC {
+func MetricHandler(next xhandler.HandlerC) xhandler.HandlerC {
 	return xhandler.HandlerFuncC(
 		func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
 			// start timing
@@ -34,10 +34,6 @@ func MetricHandler(route string, next xhandler.HandlerC) xhandler.HandlerC {
 			// check for provided auth
 			token := r.URL.Query().Get("token")
 			ctx = context.WithValue(ctx, keyToken, token)
-
-			// store auth as a boolean for metrics
-			metric := &Metric{Key: key, Auth: token != "", Route: route}
-			ctx = context.WithValue(ctx, keyMetric, metric)
 
 			// run the rest of the chain
 			next.ServeHTTPC(ctx, w, r)

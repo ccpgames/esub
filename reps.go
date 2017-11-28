@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"log"
 	"net/http"
 	"sync"
 	"time"
@@ -65,62 +66,25 @@ type WebsocketRep struct {
 	Data  string `json:"data"`
 }
 
-type pRepList struct {
-	result chan float64
+// PReps stores a list of all connected PRep clients
+type PReps struct {
+	Mutex *sync.Mutex
+	PReps map[string]*PRep // PRep.ID: PRep
 }
 
-type pRepQuery struct {
-	query  string
-	result chan float64
-}
+var pReps = PReps{Mutex: &sync.Mutex{}, PReps: map[string]*PRep{}}
 
-var pReps map[string]time.Time
-var pRepAddChan chan PRep
-var pRepDeleteChan chan PRep
-var pRepListChan chan pRepList
-var pRepQueryChan chan pRepQuery
-
-// PRepInitialize starts the channels for pRep support
-func PRepInitialize() {
-	pReps = make(map[string]time.Time)
-	pRepAddChan = make(chan PRep, 100)
-	pRepDeleteChan = make(chan PRep, 100)
-	pRepListChan = make(chan pRepList, 100)
-	pRepQueryChan = make(chan pRepQuery, 100)
-
-	go goPRepWriter()
-}
-
-// channels to add, remove and list pRep IDs
-func goPRepWriter() {
-	for {
-		select {
-
-		case ra := <-pRepAddChan:
-			pReps[ra.ID.String()] = time.Now().UTC()
-
-		case rd := <-pRepDeleteChan:
-			delete(pReps, rd.ID.String())
-
-		case rl := <-pRepListChan:
-			rl.result <- float64(len(pReps))
-
-		case rq := <-pRepQueryChan:
-			rq.result <- time.Since(pReps[rq.query]).Seconds()
-
-		}
-	}
-}
-
-func pRepCount() float64 {
-	query := pRepList{result: make(chan float64)}
-	pRepListChan <- query
-	return <-query.result
+// PRepCount -- return a count of the number of connected PRep clients
+func PRepCount() float64 {
+	pReps.Mutex.Lock()
+	count := len(pReps.PReps)
+	pReps.Mutex.Unlock()
+	return float64(count)
 }
 
 // RegisterPRep -- create and register a new persistent Rep object
-func RegisterPRep(cancel context.CancelFunc, conn *websocket.Conn) PRep {
-	pRep := PRep{
+func RegisterPRep(cancel context.CancelFunc, conn *websocket.Conn) *PRep {
+	pRep := &PRep{
 		ID:         uuid.NewV4(),
 		Cancel:     cancel,
 		Websocket:  conn,
@@ -129,18 +93,26 @@ func RegisterPRep(cancel context.CancelFunc, conn *websocket.Conn) PRep {
 		RepChan:    make(chan Rep),
 	}
 
-	pRepAddChan <- pRep
+	pReps.Mutex.Lock()
+	pReps.PReps[pRep.ID.String()] = pRep
+	pReps.Mutex.Unlock()
+
 	return pRep
 }
 
-// DeregisterPRep -- removes a pRep from tracking
-func DeregisterPRep(p PRep) {
+// Deregister -- removes a pRep from tracking
+func (p *PRep) Deregister() {
 	p.Cancel()
-	pRepDeleteChan <- p
+	pReps.Mutex.Lock()
+	delete(pReps.PReps, p.ID.String())
+	pReps.Mutex.Unlock()
+	if err := p.Websocket.Close(); err != nil {
+		log.Printf("Error closing prep: %s", err.Error())
+	}
 }
 
 // ReadLoop -- goroutine to forever read from the websocket
-func (p PRep) ReadLoop() {
+func (p *PRep) ReadLoop() {
 	for {
 		p.ReadMutex.Lock()
 		_, msg, err := p.Websocket.ReadMessage()
@@ -204,10 +176,10 @@ func receiveRep(
 ) replyError {
 
 	// fetch the sub object,
-	sub := SubQuery(key, psubRep)
+	psub, sub := SubQuery(key, psubRep)
 
 	// check the key is known to us
-	if sub.Key != key || key == "" {
+	if sub == nil {
 		return replyError{404, []byte("Unknown key")}
 	}
 
@@ -222,13 +194,13 @@ func receiveRep(
 		return replyError{500, []byte(fmt.Sprintf("Failed to read body: %+v", err))}
 	}
 
-	subReply := SubReply{body, start}
+	subReply := &SubReply{body, start}
 
-	if sub.Websocket != nil {
+	if psub != nil {
 		// sub is a psub
-		if !WriteToPSub(sub.Websocket, subReply, sub) {
-			DeregisterPSub(sub)
-			if !RedirectPSub(sub, subReply) {
+		if !psub.WriteToSub(sub, subReply) {
+			psub.Deregister(sub)
+			if !psub.Redirect(sub, subReply) {
 				return replyError{404, []byte("No listeners remain")}
 			}
 		}

@@ -5,14 +5,13 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
-	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/xhandler"
 	"github.com/rs/xmux"
@@ -21,14 +20,65 @@ import (
 type key int
 
 const (
-	keyKey    key = iota
-	keyToken  key = iota
-	keyMetric key = iota
-	keyStart  key = iota
+	keyKey   key = iota
+	keyToken key = iota
+	keyStart key = iota
 )
 
-// this shouldn't change for our lifetime
-var infoJSON = getInfoJSON()
+var (
+	// this shouldn't change for our lifetime
+	infoJSON = getInfoJSON()
+
+	metricPrefix = MetricPrefix()
+
+	// exposed prometheus Metrics
+	httpRequest = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: metricPrefix,
+			Subsystem: "http",
+			Name:      "request",
+			Help:      "http requests received",
+		},
+		[]string{"route", "method", "success", "auth", "confirmed"},
+	)
+
+	psubClients = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: metricPrefix,
+			Subsystem: "psub",
+			Name:      "connected",
+			Help:      "psub clients connected",
+		},
+		[]string{},
+	)
+
+	prepClients = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: metricPrefix,
+			Subsystem: "prep",
+			Name:      "connected",
+			Help:      "prep clients connected",
+		},
+		[]string{},
+	)
+
+	subClients = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: metricPrefix,
+			Subsystem: "sub",
+			Name:      "connected",
+			Help:      "sub clients connected",
+		},
+		[]string{},
+	)
+
+	metrics = []prometheus.Collector{
+		httpRequest,
+		psubClients,
+		prepClients,
+		subClients,
+	}
+)
 
 func getInfoJSON() []byte {
 	type info struct {
@@ -62,15 +112,6 @@ func logWrite(w http.ResponseWriter, status int, content []byte) {
 	}
 }
 
-// pulls the metric struct from context, maybe sets success then sends it
-func shipMetric(ctx context.Context, success bool) Metric {
-	metric := *ctx.Value(keyMetric).(*Metric)
-	start := ctx.Value(keyStart).(time.Time)
-	metric.Success = success
-	SendMetric(metric, 1, start)
-	return metric
-}
-
 func main() {
 	c := xhandler.Chain{}
 
@@ -89,33 +130,33 @@ func main() {
 	router.GET("/ping", xhandler.HandlerFuncC(HandlePing))
 	router.GET(
 		"/info",
-		MetricHandler("info", xhandler.HandlerFuncC(HandleInfo)),
+		MetricHandler(xhandler.HandlerFuncC(HandleInfo)),
 	)
 	router.GET(
 		"/keys",
-		MetricHandler("keys", xhandler.HandlerFuncC(HandleKeys)),
+		MetricHandler(xhandler.HandlerFuncC(HandleKeys)),
 	)
 	router.GET(
 		"/sub/:sub",
-		MetricHandler("sub", xhandler.HandlerFuncC(HandleSub)),
+		MetricHandler(xhandler.HandlerFuncC(HandleSub)),
 	)
 	router.GET(
 		"/psub/:sub",
-		MetricHandler("psub", xhandler.HandlerFuncC(HandlePSub)),
+		MetricHandler(xhandler.HandlerFuncC(HandlePSub)),
 	)
 	router.POST(
 		"/rep/:sub",
-		MetricHandler("rep", xhandler.HandlerFuncC(HandleRep)),
+		MetricHandler(xhandler.HandlerFuncC(HandleRep)),
 	)
 	router.GET(
 		"/prep",
-		MetricHandler("prep", xhandler.HandlerFuncC(HandlePRep)),
+		MetricHandler(xhandler.HandlerFuncC(HandlePRep)),
 	)
 
-	Initialize(context.Background())
-	CounterInitialize()
-	PRepInitialize()
-	go DisplayStats()
+	prometheus.MustRegister(metrics...)
+
+	go PeriodicMetrics()
+	go TimeoutPSubs()
 
 	port := os.Getenv("ESUB_PORT")
 	if port == "" {
